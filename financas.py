@@ -6,9 +6,6 @@ import tempfile
 import io        
 from google import genai 
 
-# IMPORTAÇÃO DA BIBLIOTECA DE PLANILHA NA NUVEM
-from streamlit_gsheets import GSheetsConnection
-
 # Configuração da página
 st.set_page_config(page_title="Controle Financeiro", layout="wide")
 
@@ -27,10 +24,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# SISTEMA DE LOGIN 
+# SISTEMA DE LOGIN E CHAVE API GERAL
 # ==========================================
 USUARIO_CORRETO = "silvia"      
-SENHA_CORRETA = "Mae041820"     
+SENHA_CORRETA = "mae041820"     
 
 if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
@@ -54,12 +51,14 @@ if not st.session_state['autenticado']:
     st.stop() 
 
 # ---------------------------------------------------------
-# PUXANDO A CHAVE DE FORMA SEGURA DA NUVEM
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except:
     api_key = "AIzaSyA--ENMMrNZORNhDFAH76fjlH0qZTYM-So"
 # ---------------------------------------------------------
+
+DATA_FILE = "dados_financeiros.csv"
+HIST_FILE = "historico_projecoes.csv"
 
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -68,43 +67,24 @@ MESES = [
 
 CATEGORIAS = ["Geral", "Crianças", "Cartão Parcelado"]
 
-# ==========================================
-# FUNÇÕES DE BANCO DE DADOS (GOOGLE SHEETS)
-# ==========================================
 def carregar_dados():
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(ttl=0) 
-        
-        if df.empty or "Tipo" not in df.columns:
-            return pd.DataFrame(columns=[
-                "Tipo", "Categoria", "Descrição", "Valor", "Recorrência", 
-                "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"
-            ])
-            
-        # Tratamento de erros de linhas vazias
+    if os.path.exists(DATA_FILE):
+        df = pd.read_csv(DATA_FILE)
         df = df.dropna(subset=['Ano_Inicio', 'Ano_Fim'])
-        
-        df["Categoria"] = df["Categoria"].fillna("Geral")
+        if "Categoria" not in df.columns: df["Categoria"] = "Geral"
+        if "Meses_Pagos" not in df.columns: df["Meses_Pagos"] = ""
         df["Meses_Pagos"] = df["Meses_Pagos"].fillna("")
-        
         df['Ano_Inicio'] = pd.to_numeric(df['Ano_Inicio'], errors='coerce').fillna(datetime.now().year).astype(int)
         df['Ano_Fim'] = pd.to_numeric(df['Ano_Fim'], errors='coerce').fillna(datetime.now().year).astype(int)
-        
         return df
-    except Exception as e:
-        st.error("Banco de Dados Vazio ou Conexão Pendente.")
+    else:
         return pd.DataFrame(columns=[
             "Tipo", "Categoria", "Descrição", "Valor", "Recorrência", 
             "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"
         ])
 
 def salvar_dados(df):
-    try:
-        conn = st.connection("gsheets", type=GSheetsConnection)
-        conn.update(data=df)
-    except Exception as e:
-        st.error(f"Erro ao salvar na nuvem: {e}")
+    df.to_csv(DATA_FILE, index=False)
 
 if 'df' not in st.session_state: st.session_state.df = carregar_dados()
 
@@ -134,6 +114,46 @@ def calcular_saldo_anterior(mes_alvo, ano_alvo, df):
             if row['Tipo'] == 'Receita': saldo_total += row['Valor'] * meses_ativos_nao_pagos
             else: saldo_total -= row['Valor'] * meses_ativos_nao_pagos
     return saldo_total
+
+# --- NOVO ALGORITMO: DETECTOR DE MÊS NEGATIVO ---
+def encontrar_primeiro_mes_negativo(df):
+    hoje = datetime.now()
+    mes_hoje = MESES[hoje.month - 1]
+    ano_hoje = hoje.year
+    idx_hoje = ano_hoje * 12 + hoje.month - 1
+    
+    saldo_atual = calcular_saldo_anterior(mes_hoje, ano_hoje, df)
+    
+    idx_max = idx_hoje + 120 # Projeta 10 anos à frente
+    saldos_mensais = {i: 0.0 for i in range(idx_hoje, idx_max + 1)}
+    
+    for _, row in df.iterrows():
+        idx_inicio = row['Ano_Inicio'] * 12 + MESES.index(row['Mes_Inicio'])
+        idx_fim = row['Ano_Fim'] * 12 + MESES.index(row['Mes_Fim'])
+        
+        str_pagos = str(row.get('Meses_Pagos', ''))
+        pagos_list = [p.strip() for p in str_pagos.split(',') if p.strip()]
+        
+        start_calc = max(idx_hoje, idx_inicio)
+        end_calc = min(idx_max, idx_fim)
+        
+        if start_calc <= end_calc:
+            val = row['Valor'] if row['Tipo'] == 'Receita' else -row['Valor']
+            for curr_idx in range(start_calc, end_calc + 1):
+                curr_m = MESES[curr_idx % 12]
+                curr_a = curr_idx // 12
+                if f"{curr_m}/{curr_a}" not in pagos_list:
+                    saldos_mensais[curr_idx] += val
+                    
+    saldo_acumulado = saldo_atual
+    for idx in range(idx_hoje, idx_max + 1):
+        saldo_acumulado += saldos_mensais[idx]
+        if saldo_acumulado < 0:
+            m_neg = MESES[idx % 12]
+            a_neg = idx // 12
+            return m_neg, a_neg, saldo_acumulado
+    return None, None, None
+# ------------------------------------------------
 
 def obter_meses_exibicao(ano_selecionado, mostrar_passados=False):
     if mostrar_passados: return MESES
@@ -232,9 +252,40 @@ def modal_saldo(mes, ano):
         st.success("Saldo atualizado com sucesso!")
         st.rerun()
 
+
+# ==========================================
+# CÁLCULOS DO DASHBOARD E HISTÓRICO
+# ==========================================
+# Projeções do Caixa no Final do Ano = Saldo acumulado até o Mês Anterior a "Janeiro" do ano seguinte
+proj_26 = calcular_saldo_anterior("Janeiro", 2027, st.session_state.df)
+proj_27 = calcular_saldo_anterior("Janeiro", 2028, st.session_state.df)
+proj_28 = calcular_saldo_anterior("Janeiro", 2029, st.session_state.df)
+
+hoje_str = datetime.now().strftime("%Y-%m-%d")
+
+# Gestão do ficheiro histórico invisível
+if os.path.exists(HIST_FILE):
+    df_hist = pd.read_csv(HIST_FILE)
+else:
+    df_hist = pd.DataFrame(columns=["Data", "Proj_Dez_2026", "Proj_Dez_2027", "Proj_Dez_2028"])
+
+# Atualiza os dados de "hoje", criando o histórico
+if hoje_str in df_hist['Data'].values:
+    df_hist.loc[df_hist['Data'] == hoje_str, ['Proj_Dez_2026', 'Proj_Dez_2027', 'Proj_Dez_2028']] = [proj_26, proj_27, proj_28]
+else:
+    nova_linha = pd.DataFrame([{"Data": hoje_str, "Proj_Dez_2026": proj_26, "Proj_Dez_2027": proj_27, "Proj_Dez_2028": proj_28}])
+    df_hist = pd.concat([df_hist, nova_linha], ignore_index=True)
+df_hist.to_csv(HIST_FILE, index=False)
+
+
+# ==========================================
+# RENDERIZAÇÃO DA INTERFACE PRINCIPAL
+# ==========================================
 st.title("💰 Controle Financeiro Pessoal")
 
-aba_cadastro, aba_fatura, aba_resumo, aba_detalhada, aba_ia = st.tabs(["📝 Cadastrar", "📥 Importar Fatura", "📊 Resumo", "📋 Planilha", "🤖 Consultor IA"])
+aba_dashboard, aba_cadastro, aba_fatura, aba_resumo, aba_detalhada, aba_ia = st.tabs([
+    "🏠 Dashboard", "📝 Cadastrar", "📥 Importar Fatura", "📊 Resumo", "📋 Planilha", "🤖 Consultor IA"
+])
 
 tem_dados = not st.session_state.df.empty
 anos_cadastrados = set()
@@ -242,6 +293,41 @@ if tem_dados:
     for idx, row in st.session_state.df.iterrows(): anos_cadastrados.update(range(int(row['Ano_Inicio']), int(row['Ano_Fim']) + 1))
 anos_disponiveis = sorted(list(anos_cadastrados)) if anos_cadastrados else [datetime.now().year]
 
+
+# ----------------------------------------------------
+# NOVA ABA 0: DASHBOARD 
+# ----------------------------------------------------
+with aba_dashboard:
+    st.markdown("### 🎯 Radar Financeiro e Projeções")
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Projeção Caixa: Dez/2026", formata_moeda(proj_26))
+    col2.metric("Projeção Caixa: Dez/2027", formata_moeda(proj_27))
+    col3.metric("Projeção Caixa: Dez/2028", formata_moeda(proj_28))
+    
+    st.divider()
+    
+    st.markdown("#### 🚨 Termômetro de Sobrevivência")
+    mes_neg, ano_neg, valor_neg = encontrar_primeiro_mes_negativo(st.session_state.df)
+    if mes_neg:
+        st.error(f"⚠️ **Atenção Máxima:** Se não houver alteração nas despesas ou receitas, o seu caixa ficará no vermelho pela primeira vez em **{mes_neg} de {ano_neg}** (Projeção: {formata_moeda(valor_neg)}).")
+    else:
+        st.success("✅ **Saúde Impecável:** Parabéns! Pelas suas projeções atuais, o seu saldo manter-se-á positivo pelos próximos 10 anos!")
+        
+    st.divider()
+    
+    st.markdown("#### 📈 Variação das Projeções no Tempo")
+    st.caption("Acompanhe como as suas novas despesas ou cortes afetam o seu futuro. Quando a linha sobe, significa que o seu planejamento está a gerar mais caixa no longo prazo!")
+    
+    df_hist_plot = df_hist.set_index("Data")[["Proj_Dez_2026", "Proj_Dez_2027"]]
+    # Renomear para ficar bonito no gráfico
+    df_hist_plot.columns = ["Projeção 2026", "Projeção 2027"]
+    st.line_chart(df_hist_plot, color=["#1f77b4", "#28a745"])
+
+
+# ----------------------------------------------------
+# ABA 1: CADASTRO 
+# ----------------------------------------------------
 with aba_cadastro:
     st.markdown("#### Configuração do Lançamento")
     c_tipo, c_rec = st.columns(2)
@@ -334,9 +420,9 @@ with aba_cadastro:
                             salvar_dados(st.session_state.df)
                             st.rerun()
 
-# ==========================================
-# ABA 1.5: IMPORTAÇÃO INTELIGENTE DE FATURAS 
-# ==========================================
+# ----------------------------------------------------
+# ABA 2: IMPORTAÇÃO INTELIGENTE DE FATURAS
+# ----------------------------------------------------
 with aba_fatura:
     st.markdown("### 📥 Leitura de Fatura de Cartão (via IA)")
     st.write("A IA vai ler a fatura detalhadamente, mas **salvará apenas a somatória total projetada para cada mês** na sua planilha.")
@@ -380,7 +466,7 @@ with aba_fatura:
                     st.error(f"Ocorreu um erro: {e}")
                     
     elif arquivo_pdf:
-        st.warning("⚠️ Chave de API não configurada nos Segredos do Streamlit Cloud.")
+        st.warning("⚠️ Chave de API não encontrada! Configure o arquivo secrets.toml conforme as instruções.")
         
     if "df_fatura_temp" in st.session_state and not st.session_state.df_fatura_temp.empty:
         st.markdown("#### 📋 Detalhamento da Fatura (Para Revisão)")
@@ -435,16 +521,9 @@ with aba_fatura:
                     m_alvo = MESES[idx_alvo % 12]
                     a_alvo = idx_alvo // 12
                     novos_lancamentos.append({
-                        "Tipo": "Despesa", 
-                        "Categoria": "Cartão Parcelado", 
-                        "Descrição": nome_cartao, 
-                        "Valor": total_val, 
-                        "Recorrência": "Apenas em um mês", 
-                        "Mes_Inicio": m_alvo, 
-                        "Ano_Inicio": a_alvo, 
-                        "Mes_Fim": m_alvo, 
-                        "Ano_Fim": a_alvo, 
-                        "Meses_Pagos": ""
+                        "Tipo": "Despesa", "Categoria": "Cartão Parcelado", "Descrição": nome_cartao, 
+                        "Valor": total_val, "Recorrência": "Apenas em um mês", 
+                        "Mes_Inicio": m_alvo, "Ano_Inicio": a_alvo, "Mes_Fim": m_alvo, "Ano_Fim": a_alvo, "Meses_Pagos": ""
                     })
                 
                 if novos_lancamentos:
@@ -454,9 +533,9 @@ with aba_fatura:
                     st.success(f"🎉 Pronto! A somatória foi lançada e projetada em {len(novos_lancamentos)} meses com sucesso!")
                     st.rerun()
 
-# ==========================================
-# ABA 2: RESUMO POR PERÍODO
-# ==========================================
+# ----------------------------------------------------
+# ABA 3: RESUMO POR PERÍODO
+# ----------------------------------------------------
 with aba_resumo:
     st.markdown("### Acumulado do Período")
     if not tem_dados:
@@ -562,9 +641,9 @@ with aba_resumo:
                     st.markdown("**Evolução do Saldo Mensal**")
                     st.line_chart(df_grafico[["Saldo do Mês"]], color=["#1f77b4"])
 
-# ==========================================
-# ABA 3: VISÃO PLANILHA MINIMALISTA 
-# ==========================================
+# ----------------------------------------------------
+# ABA 4: VISÃO PLANILHA MINIMALISTA 
+# ----------------------------------------------------
 with aba_detalhada:
     st.markdown("### Visão Contínua e Baixa de Lançamentos")
     st.caption("✔️ **Marque a caixinha** para dar baixa. O valor deixará de ser contado nas pendências.")
@@ -666,9 +745,9 @@ with aba_detalhada:
                                     cor_acumulado = "#28a745" if saldo_acumulado >= 0 else "#dc3545"
                                     st.markdown(f"<div style='display: flex; justify-content: space-between; font-size: 1.05em; margin-top: 2px;'><span><b>CAIXA FINAL:</b></span> <strong style='color: {cor_acumulado};'>{formata_moeda(saldo_acumulado)}</strong></div>", unsafe_allow_html=True)
 
-# ==========================================
-# ABA 4: CONSULTOR IA GEMINI 
-# ==========================================
+# ----------------------------------------------------
+# ABA 5: CONSULTOR IA GEMINI 
+# ----------------------------------------------------
 with aba_ia:
     st.markdown("### 🤖 Consultor Financeiro Inteligente (Gemini)")
     if len(api_key) > 20:
@@ -717,4 +796,4 @@ with aba_ia:
                                 
         except Exception as e: st.error(f"Erro na configuração da API Key. Detalhes: {e}")
     else:
-        st.warning("⚠️ Chave de API não configurada nos Segredos do Streamlit Cloud!")
+        st.warning("⚠️ Chave de API não encontrada! Configure o arquivo secrets.toml para usar o chat.")
