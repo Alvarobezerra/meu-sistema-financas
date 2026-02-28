@@ -57,6 +57,40 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# SISTEMA DE LOGIN / AUTENTICAÇÃO
+# ==========================================
+USUARIO_CORRETO = "Silvia"      # <--- MUDE O SEU USUÁRIO AQUI
+SENHA_CORRETA = "Mae041820"     # <--- MUDE A SUA SENHA AQUI
+
+if 'autenticado' not in st.session_state:
+    st.session_state['autenticado'] = False
+
+if not st.session_state['autenticado']:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c2:
+        st.markdown("<h2 style='text-align: center;'>🔒 Acesso Restrito</h2>", unsafe_allow_html=True)
+        with st.container(border=True):
+            with st.form("form_login"):
+                usuario_input = st.text_input("Usuário")
+                senha_input = st.text_input("Senha", type="password")
+                submit_login = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+                
+                if submit_login:
+                    if usuario_input == USUARIO_CORRETO and senha_input == SENHA_CORRETA:
+                        st.session_state['autenticado'] = True
+                        st.rerun() # Recarrega a página liberando o sistema
+                    else:
+                        st.error("❌ Usuário ou senha incorretos!")
+    
+    # O comando abaixo impede que o resto do código seja lido se não estiver logado
+    st.stop() 
+
+
+# ==========================================
+# O SISTEMA REAL COMEÇA AQUI (SÓ APARECE APÓS LOGIN)
+# ==========================================
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
