@@ -29,8 +29,8 @@ st.markdown("""
 # ==========================================
 # SISTEMA DE LOGIN E CHAVE API GERAL
 # ==========================================
-USUARIO_CORRETO = "silvia"      
-SENHA_CORRETA = "mae041820"
+USUARIO_CORRETO = "admin"      
+SENHA_CORRETA = "senha123"     
 
 if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
@@ -58,7 +58,7 @@ if not st.session_state['autenticado']:
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except:
-    api_key = "AIzaSyA--ENMMrNZORNhDFAH76fjlH0qZTYM-So"
+    api_key = ""
 # ---------------------------------------------------------
 
 MESES = [
@@ -82,7 +82,16 @@ def carregar_dados():
                 "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"
             ])
             
-        df = df.dropna(subset=['Ano_Inicio', 'Ano_Fim'])
+        # SUPER FAXINA: Remove as linhas sem ano e sem mês
+        df = df.dropna(subset=['Ano_Inicio', 'Ano_Fim', 'Mes_Inicio', 'Mes_Fim'])
+        
+        # Limpa espaços em branco ocultos e garante a 1ª letra maiúscula
+        df['Mes_Inicio'] = df['Mes_Inicio'].astype(str).str.strip().str.title()
+        df['Mes_Fim'] = df['Mes_Fim'].astype(str).str.strip().str.title()
+        
+        # Remove do cálculo linhas que tenham meses inválidos
+        df = df[df['Mes_Inicio'].isin(MESES) & df['Mes_Fim'].isin(MESES)]
+        
         df["Categoria"] = df["Categoria"].fillna("Geral")
         df["Meses_Pagos"] = df["Meses_Pagos"].fillna("")
         df['Ano_Inicio'] = pd.to_numeric(df['Ano_Inicio'], errors='coerce').fillna(datetime.now().year).astype(int)
@@ -100,7 +109,7 @@ def salvar_dados(df):
     except Exception as e:
         st.error(f"Erro ao salvar na nuvem: {e}")
 
-# --- NOVAS FUNÇÕES PARA O HISTÓRICO DO GRÁFICO ---
+# --- FUNÇÕES PARA O HISTÓRICO DO GRÁFICO ---
 def carregar_historico():
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
@@ -116,7 +125,7 @@ def salvar_historico(df_hist):
         conn = st.connection("gsheets", type=GSheetsConnection)
         conn.update(worksheet="Historico", data=df_hist)
     except Exception:
-        st.sidebar.warning("⚠️ Para guardar o histórico do gráfico, crie uma aba chamada 'Historico' no seu Google Sheets.")
+        pass # Ignora silenciosamente se a aba ainda não foi criada
 # --------------------------------------------------
 
 if 'df' not in st.session_state: st.session_state.df = carregar_dados()
@@ -299,7 +308,7 @@ if hoje_str in df_hist['Data'].values:
 else:
     nova_linha = pd.DataFrame([{"Data": hoje_str, "Proj_Dez_2026": proj_26, "Proj_Dez_2027": proj_27, "Proj_Dez_2028": proj_28}])
     df_hist = pd.concat([df_hist, nova_linha], ignore_index=True)
-    salvar_historico(df_hist) # Guarda no Google Sheets (Aba Historico)
+    salvar_historico(df_hist) 
 
 
 # ==========================================
