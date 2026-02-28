@@ -6,6 +6,9 @@ import tempfile
 import io        
 from google import genai 
 
+# IMPORTAÇÃO DA BIBLIOTECA DE PLANILHA NA NUVEM
+from streamlit_gsheets import GSheetsConnection
+
 # Configuração da página
 st.set_page_config(page_title="Controle Financeiro", layout="wide")
 
@@ -27,7 +30,7 @@ st.markdown("""
 # SISTEMA DE LOGIN E CHAVE API GERAL
 # ==========================================
 USUARIO_CORRETO = "silvia"      
-SENHA_CORRETA = "mae041820"     
+SENHA_CORRETA = "mae041820"
 
 if 'autenticado' not in st.session_state:
     st.session_state['autenticado'] = False
@@ -51,14 +54,12 @@ if not st.session_state['autenticado']:
     st.stop() 
 
 # ---------------------------------------------------------
+# PUXANDO A CHAVE DE FORMA SEGURA DA NUVEM
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
 except:
     api_key = "AIzaSyA--ENMMrNZORNhDFAH76fjlH0qZTYM-So"
 # ---------------------------------------------------------
-
-DATA_FILE = "dados_financeiros.csv"
-HIST_FILE = "historico_projecoes.csv"
 
 MESES = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -67,24 +68,56 @@ MESES = [
 
 CATEGORIAS = ["Geral", "Crianças", "Cartão Parcelado"]
 
+# ==========================================
+# FUNÇÕES DE BANCO DE DADOS (GOOGLE SHEETS)
+# ==========================================
 def carregar_dados():
-    if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE)
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(ttl=0) 
+        
+        if df.empty or "Tipo" not in df.columns:
+            return pd.DataFrame(columns=[
+                "Tipo", "Categoria", "Descrição", "Valor", "Recorrência", 
+                "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"
+            ])
+            
         df = df.dropna(subset=['Ano_Inicio', 'Ano_Fim'])
-        if "Categoria" not in df.columns: df["Categoria"] = "Geral"
-        if "Meses_Pagos" not in df.columns: df["Meses_Pagos"] = ""
+        df["Categoria"] = df["Categoria"].fillna("Geral")
         df["Meses_Pagos"] = df["Meses_Pagos"].fillna("")
         df['Ano_Inicio'] = pd.to_numeric(df['Ano_Inicio'], errors='coerce').fillna(datetime.now().year).astype(int)
         df['Ano_Fim'] = pd.to_numeric(df['Ano_Fim'], errors='coerce').fillna(datetime.now().year).astype(int)
+        
         return df
-    else:
-        return pd.DataFrame(columns=[
-            "Tipo", "Categoria", "Descrição", "Valor", "Recorrência", 
-            "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"
-        ])
+    except Exception as e:
+        st.error("Banco de Dados Vazio ou Conexão Pendente.")
+        return pd.DataFrame(columns=["Tipo", "Categoria", "Descrição", "Valor", "Recorrência", "Mes_Inicio", "Ano_Inicio", "Mes_Fim", "Ano_Fim", "Meses_Pagos"])
 
 def salvar_dados(df):
-    df.to_csv(DATA_FILE, index=False)
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        conn.update(data=df)
+    except Exception as e:
+        st.error(f"Erro ao salvar na nuvem: {e}")
+
+# --- NOVAS FUNÇÕES PARA O HISTÓRICO DO GRÁFICO ---
+def carregar_historico():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df_hist = conn.read(worksheet="Historico", ttl=0)
+        if df_hist.empty or "Data" not in df_hist.columns:
+            return pd.DataFrame(columns=["Data", "Proj_Dez_2026", "Proj_Dez_2027", "Proj_Dez_2028"])
+        return df_hist
+    except Exception:
+        return pd.DataFrame(columns=["Data", "Proj_Dez_2026", "Proj_Dez_2027", "Proj_Dez_2028"])
+
+def salvar_historico(df_hist):
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        conn.update(worksheet="Historico", data=df_hist)
+    except Exception:
+        st.sidebar.warning("⚠️ Para guardar o histórico do gráfico, crie uma aba chamada 'Historico' no seu Google Sheets.")
+# --------------------------------------------------
 
 if 'df' not in st.session_state: st.session_state.df = carregar_dados()
 
@@ -115,7 +148,6 @@ def calcular_saldo_anterior(mes_alvo, ano_alvo, df):
             else: saldo_total -= row['Valor'] * meses_ativos_nao_pagos
     return saldo_total
 
-# --- NOVO ALGORITMO: DETECTOR DE MÊS NEGATIVO ---
 def encontrar_primeiro_mes_negativo(df):
     hoje = datetime.now()
     mes_hoje = MESES[hoje.month - 1]
@@ -124,7 +156,7 @@ def encontrar_primeiro_mes_negativo(df):
     
     saldo_atual = calcular_saldo_anterior(mes_hoje, ano_hoje, df)
     
-    idx_max = idx_hoje + 120 # Projeta 10 anos à frente
+    idx_max = idx_hoje + 120 
     saldos_mensais = {i: 0.0 for i in range(idx_hoje, idx_max + 1)}
     
     for _, row in df.iterrows():
@@ -153,7 +185,6 @@ def encontrar_primeiro_mes_negativo(df):
             a_neg = idx // 12
             return m_neg, a_neg, saldo_acumulado
     return None, None, None
-# ------------------------------------------------
 
 def obter_meses_exibicao(ano_selecionado, mostrar_passados=False):
     if mostrar_passados: return MESES
@@ -254,28 +285,21 @@ def modal_saldo(mes, ano):
 
 
 # ==========================================
-# CÁLCULOS DO DASHBOARD E HISTÓRICO
+# CÁLCULOS DO DASHBOARD E HISTÓRICO NA NUVEM
 # ==========================================
-# Projeções do Caixa no Final do Ano = Saldo acumulado até o Mês Anterior a "Janeiro" do ano seguinte
 proj_26 = calcular_saldo_anterior("Janeiro", 2027, st.session_state.df)
 proj_27 = calcular_saldo_anterior("Janeiro", 2028, st.session_state.df)
 proj_28 = calcular_saldo_anterior("Janeiro", 2029, st.session_state.df)
 
 hoje_str = datetime.now().strftime("%Y-%m-%d")
+df_hist = carregar_historico()
 
-# Gestão do ficheiro histórico invisível
-if os.path.exists(HIST_FILE):
-    df_hist = pd.read_csv(HIST_FILE)
-else:
-    df_hist = pd.DataFrame(columns=["Data", "Proj_Dez_2026", "Proj_Dez_2027", "Proj_Dez_2028"])
-
-# Atualiza os dados de "hoje", criando o histórico
 if hoje_str in df_hist['Data'].values:
     df_hist.loc[df_hist['Data'] == hoje_str, ['Proj_Dez_2026', 'Proj_Dez_2027', 'Proj_Dez_2028']] = [proj_26, proj_27, proj_28]
 else:
     nova_linha = pd.DataFrame([{"Data": hoje_str, "Proj_Dez_2026": proj_26, "Proj_Dez_2027": proj_27, "Proj_Dez_2028": proj_28}])
     df_hist = pd.concat([df_hist, nova_linha], ignore_index=True)
-df_hist.to_csv(HIST_FILE, index=False)
+    salvar_historico(df_hist) # Guarda no Google Sheets (Aba Historico)
 
 
 # ==========================================
@@ -295,7 +319,7 @@ anos_disponiveis = sorted(list(anos_cadastrados)) if anos_cadastrados else [date
 
 
 # ----------------------------------------------------
-# NOVA ABA 0: DASHBOARD 
+# ABA 0: DASHBOARD 
 # ----------------------------------------------------
 with aba_dashboard:
     st.markdown("### 🎯 Radar Financeiro e Projeções")
@@ -319,10 +343,10 @@ with aba_dashboard:
     st.markdown("#### 📈 Variação das Projeções no Tempo")
     st.caption("Acompanhe como as suas novas despesas ou cortes afetam o seu futuro. Quando a linha sobe, significa que o seu planejamento está a gerar mais caixa no longo prazo!")
     
-    df_hist_plot = df_hist.set_index("Data")[["Proj_Dez_2026", "Proj_Dez_2027"]]
-    # Renomear para ficar bonito no gráfico
-    df_hist_plot.columns = ["Projeção 2026", "Projeção 2027"]
-    st.line_chart(df_hist_plot, color=["#1f77b4", "#28a745"])
+    if not df_hist.empty:
+        df_hist_plot = df_hist.set_index("Data")[["Proj_Dez_2026", "Proj_Dez_2027"]]
+        df_hist_plot.columns = ["Projeção 2026", "Projeção 2027"]
+        st.line_chart(df_hist_plot, color=["#1f77b4", "#28a745"])
 
 
 # ----------------------------------------------------
@@ -436,7 +460,7 @@ with aba_fatura:
     
     if arquivo_pdf and len(api_key) > 20:
         if st.button("🔍 Extrair Dados com Inteligência Artificial", type="primary", use_container_width=True):
-            with st.spinner("🧠 A IA está lendo o PDF e identificando as compras..."):
+            with st.spinner("🧠 A IA está a ler o PDF e identificar as compras..."):
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(arquivo_pdf.read())
@@ -466,11 +490,11 @@ with aba_fatura:
                     st.error(f"Ocorreu um erro: {e}")
                     
     elif arquivo_pdf:
-        st.warning("⚠️ Chave de API não encontrada! Configure o arquivo secrets.toml conforme as instruções.")
+        st.warning("⚠️ Chave de API não configurada nos Segredos do Streamlit Cloud.")
         
     if "df_fatura_temp" in st.session_state and not st.session_state.df_fatura_temp.empty:
         st.markdown("#### 📋 Detalhamento da Fatura (Para Revisão)")
-        st.caption("Você pode editar valores ou parcelas abaixo caso a leitura tenha falhado em algum item. **Esta lista detalhada não irá sujar o seu caixa.**")
+        st.caption("Pode editar valores ou parcelas abaixo caso a leitura tenha falhado em algum item. **Esta lista detalhada não irá sujar o seu caixa.**")
         
         df_editado_fat = st.data_editor(st.session_state.df_fatura_temp, use_container_width=True)
         
@@ -796,4 +820,4 @@ with aba_ia:
                                 
         except Exception as e: st.error(f"Erro na configuração da API Key. Detalhes: {e}")
     else:
-        st.warning("⚠️ Chave de API não encontrada! Configure o arquivo secrets.toml para usar o chat.")
+        st.warning("⚠️ Chave de API não configurada nos Segredos do Streamlit Cloud.")
